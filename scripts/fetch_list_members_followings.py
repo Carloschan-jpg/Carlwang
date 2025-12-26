@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
 """
-获取 KOL 关注列表并入库
-从 twitter_kol 表读取所有 KOL，查询其关注列表，存入 twitter_kol_all 表
+获取 List Members 关注列表并入库（新接口版本）
+从 twitter_list_members_seed 表读取所有 members，查询其关注列表，存入 twitter_kol_all 表
+
+新接口使用 AISA payment token
+API Token: aisa_79b13d0fb25016be8fd3553b5b8055ac
 
 带缓存和断点续传功能，防止API重复调用浪费费用
 
+分层爬取策略：
+- following < 1000: 采集 200 条（1页）
+- 1000 ≤ following ≤ 2000: 采集 300 条（2页）
+- following > 2000: 跳过（质量不高）
+
 使用方法：
-    # 测试模式（只处理前3个KOL，不调用API，不入库）
-    python fetch_kol_followings.py --test
+    # 测试模式（只处理前3个member，不调用API，不入库）
+    python fetch_list_members_followings.py --test
 
     # 模拟模式（调用真实API但不入库，测试API连接）
-    python fetch_kol_followings.py --dry-run --limit 1
+    python fetch_list_members_followings.py --dry-run --limit 1
 
-    # 正式运行（处理所有KOL，自动使用缓存）
-    python fetch_kol_followings.py
+    # 正式运行（处理所有members，自动使用缓存，简洁输出）
+    python fetch_list_members_followings.py --quiet
 
-    # 正式运行（指定处理数量）
-    python fetch_kol_followings.py --limit 10
+    # 正式运行（指定处理数量，简洁输出）
+    python fetch_list_members_followings.py --limit 10 -q
+
+    # 指定List ID
+    python fetch_list_members_followings.py --list-id "1996467877948600431" --limit 20 -q
 
     # 从缓存恢复（只入库已缓存的数据，不调用API）
-    python fetch_kol_followings.py --resume
+    python fetch_list_members_followings.py --resume
 
     # 清理所有缓存和进度
-    python fetch_kol_followings.py --clear-cache
+    python fetch_list_members_followings.py --clear-cache
 
     # 查看缓存状态
-    python fetch_kol_followings.py --cache-status
+    python fetch_list_members_followings.py --cache-status
 """
 import sys
 from pathlib import Path
@@ -45,21 +56,25 @@ from src.database.connection import db_manager
 from src.utils.logger import get_logger
 
 
-class KOLFollowingsFetcher:
-    """KOL关注列表获取器（带缓存和断点续传）"""
+class ListMembersFollowingsFetcher:
+    """List Members 关注列表获取器（带缓存和断点续传）"""
 
-    def __init__(self, api_key: str, cache_dir: str = ".kol_cache"):
+    def __init__(self, api_key: str, list_id: str = "1996467877948600431", cache_dir: str = ".kol_cache", quiet: bool = False):
         """
         初始化获取器
 
         Args:
-            api_key: Twitter API密钥
+            api_key: AISA Payment Token
+            list_id: Twitter List ID（默认: 1996467877948600431）
             cache_dir: 缓存目录路径
+            quiet: 静默模式（只显示关键进度信息）
         """
         self.logger = get_logger(__name__)
         self.db_manager = db_manager
         self.api_key = api_key
-        self.api_base_url = "https://api.twitterapi.io/twitter/user/followings"
+        self.list_id = list_id
+        self.api_base_url = "https://openapi.aisa.one/twitter/user/followings"
+        self.quiet = quiet  # 静默模式标志
 
         # 缓存配置
         self.cache_dir = Path(cache_dir)
@@ -71,11 +86,17 @@ class KOLFollowingsFetcher:
         self.processed_kols = 0
         self.success_kols = 0
         self.failed_kols = 0
+        self.skipped_kols = 0  # 跳过的KOL数（following>10000）
         self.total_followings = 0
         self.inserted_followings = 0
         self.skipped_followings = 0
         self.api_calls = 0
         self.cache_hits = 0
+
+    def _log(self, message: str, force: bool = False):
+        """简化的日志输出（在quiet模式下只输出关键信息）"""
+        if not self.quiet or force:
+            print(message)
 
     def fetch_all_kol_followings(self,
                                   limit: Optional[int] = None,
@@ -99,27 +120,25 @@ class KOLFollowingsFetcher:
             是否成功
         """
         try:
-            self.logger.info("=" * 60)
-            self.logger.info("开始获取KOL关注列表")
+            self._log("=" * 60, force=True)
+            self._log(f"开始获取KOL关注列表 (List ID: {self.list_id})", force=True)
             if test_mode:
-                self.logger.info("【测试模式 - 不调用API，不入库】")
+                self._log("【测试模式 - 不调用API，不入库】", force=True)
             elif dry_run:
-                self.logger.info("【模拟运行 - 调用API但不入库】")
+                self._log("【模拟运行 - 调用API但不入库】", force=True)
             elif resume_mode:
-                self.logger.info("【恢复模式 - 从缓存恢复，不调用API】")
-            else:
-                self.logger.info("【正常模式 - 自动使用缓存，避免重复API调用】")
-            self.logger.info("=" * 60)
+                self._log("【恢复模式 - 从缓存恢复，不调用API】", force=True)
+            self._log("=" * 60, force=True)
 
             # 1. 加载进度信息
             completed_kols = self._load_progress()
-            self.logger.info(f"已完成入库的KOL数: {len(completed_kols)}")
+            self._log(f"已完成: {len(completed_kols)} 个KOL", force=True)
 
             # 2. 获取所有KOL
             kols = self._get_all_kols()
             self.total_kols = len(kols)
 
-            self.logger.info(f"从 twitter_kol 表获取到 {self.total_kols} 个KOL")
+            self._log(f"总KOL数: {self.total_kols} 个", force=True)
 
             if not kols:
                 self.logger.warning("没有找到KOL数据")
@@ -128,26 +147,44 @@ class KOLFollowingsFetcher:
             # 3. 过滤已完成的KOL
             if not resume_mode:
                 kols = [k for k in kols if k.get('user_name') not in completed_kols]
-                self.logger.info(f"过滤已完成的KOL后剩余: {len(kols)} 个")
+                self._log(f"待处理: {len(kols)} 个KOL", force=True)
 
             # 4. 应用跳过和限制
             if skip > 0:
                 kols = kols[skip:]
-                self.logger.info(f"跳过前 {skip} 个KOL，剩余 {len(kols)} 个")
 
             if limit:
                 kols = kols[:limit]
-                self.logger.info(f"限制处理 {limit} 个KOL")
+                self._log(f"限制处理: {limit} 个KOL", force=True)
 
             # 5. 测试模式特殊处理
             if test_mode:
                 kols = kols[:3]
-                self.logger.info(f"测试模式：只处理前 {len(kols)} 个KOL")
 
             # 6. 逐个处理KOL
             for idx, kol in enumerate(kols, 1):
                 user_name = kol.get('user_name')
-                self.logger.info(f"\n[{idx}/{len(kols)}] 处理KOL: {user_name}")
+                following_count = kol.get('following', 0)  # 获取用户的following数量
+
+                # 🎯 新策略: 更严格的分层限制
+                # < 1000: 采集200条（1页）
+                # 1000-2000: 采集300条（2页）
+                # > 2000: 跳过（质量不高）
+                if following_count > 2000:
+                    self._log(f"[{idx}/{len(kols)}] ⏭️  跳过 {user_name} (following: {following_count:,} > 2000)", force=True)
+                    self.processed_kols += 1
+                    self.skipped_kols += 1
+                    # 标记为已完成,避免下次重复处理
+                    self._mark_completed(user_name)
+                    continue
+
+                # 确定获取上限
+                if following_count < 1000:
+                    max_followings = 200  # 1页
+                else:  # 1000-2000
+                    max_followings = 300  # 2页
+
+                self._log(f"[{idx}/{len(kols)}] 处理 {user_name} (关注{following_count:,}人, 获取{max_followings}条)", force=True)
 
                 try:
                     if test_mode:
@@ -159,11 +196,13 @@ class KOLFollowingsFetcher:
                         # 获取关注列表（优先使用缓存）
                         followings = self._get_followings_with_cache(
                             user_name,
-                            use_api=not resume_mode
+                            use_api=not resume_mode,
+                            max_followings=max_followings,
+                            kol_following_count=following_count
                         )
 
                         if followings:
-                            self.logger.info(f"  获取到 {len(followings)} 个关注用户")
+                            self._log(f"  ✓ 获取{len(followings)}条", force=True)
                             self.total_followings += len(followings)
 
                             if not dry_run:
@@ -171,17 +210,17 @@ class KOLFollowingsFetcher:
                                 inserted = self._save_followings(followings, follower_id=user_name)
                                 self.inserted_followings += inserted
                                 self.skipped_followings += (len(followings) - inserted)
-                                self.logger.info(f"  入库: {inserted} 条新增, {len(followings) - inserted} 条已存在")
+                                self._log(f"  ✓ 入库: 新增{inserted}条, 已存在{len(followings)-inserted}条", force=True)
 
                                 # 入库成功后，记录进度并清理缓存
                                 self._mark_completed(user_name)
                                 self._clear_cache_for_kol(user_name)
                             else:
-                                self.logger.info(f"  [模拟] 将入库 {len(followings)} 条数据")
+                                self._log(f"  [模拟] 将入库{len(followings)}条")
 
                             self.success_kols += 1
                         else:
-                            self.logger.warning(f"  未获取到关注列表")
+                            self._log(f"  ✗ 未获取到数据", force=True)
                             self.failed_kols += 1
 
                         self.processed_kols += 1
@@ -210,24 +249,32 @@ class KOLFollowingsFetcher:
 
     def _get_all_kols(self) -> List[Dict[str, Any]]:
         """
-        从数据库获取所有KOL
+        从 twitter_list_members_seed 表获取所有members
 
         Returns:
-            KOL列表
+            Members列表
         """
         try:
-            sql = """
-            SELECT id, user_name, name, followers
-            FROM public_data.twitter_kol
-            WHERE user_name IS NOT NULL AND user_name != ''
-            ORDER BY followers DESC
+            sql = f"""
+            SELECT
+                twitter_user_id as id,
+                username as user_name,
+                name,
+                followers_count as followers,
+                following_count as `following`
+            FROM public_data.twitter_list_members_seed
+            WHERE source_list_id = '{self.list_id}'
+            AND username IS NOT NULL
+            AND username != ''
+            ORDER BY followers_count DESC
             """
 
             results = self.db_manager.execute_query(sql)
+            self.logger.info(f"从List {self.list_id} 查询到 {len(results) if results else 0} 个members")
             return results or []
 
         except Exception as e:
-            self.logger.error(f"查询KOL数据失败: {e}")
+            self.logger.error(f"查询List Members数据失败: {e}")
             return []
 
     def _get_cache_file(self, user_name: str) -> Path:
@@ -277,16 +324,18 @@ class KOLFollowingsFetcher:
         except Exception as e:
             self.logger.warning(f"保存进度失败: {e}")
 
-    def _get_followings_with_cache(self, user_name: str, use_api: bool = True) -> List[Dict[str, Any]]:
+    def _get_followings_with_cache(self, user_name: str, use_api: bool = True, max_followings: int = None, kol_following_count: int = 0) -> List[Dict[str, Any]]:
         """
         获取关注列表（优先使用缓存）
 
         Args:
             user_name: 用户名
             use_api: 是否允许调用API
+            max_followings: 最大获取数量限制
+            kol_following_count: KOL的关注总数（用于分层策略）
 
         Returns:
-            关注用户列表
+            关注用户列表（会根据max_followings截断）
         """
         cache_file = self._get_cache_file(user_name)
 
@@ -298,14 +347,19 @@ class KOLFollowingsFetcher:
                     followings = cache_data.get('followings', [])
                     if followings:
                         self.cache_hits += 1
-                        self.logger.info(f"  [缓存命中] 从缓存读取 {len(followings)} 条数据")
-                        return followings
+                        # 🎯 关键修复：缓存数据也需要截断到max_followings
+                        if max_followings and len(followings) > max_followings:
+                            self.logger.debug(f"  [缓存命中] 从缓存读取 {len(followings)} 条，截断到 {max_followings} 条")
+                            return followings[:max_followings]
+                        else:
+                            self.logger.debug(f"  [缓存命中] 从缓存读取 {len(followings)} 条数据")
+                            return followings
             except Exception as e:
                 self.logger.warning(f"  读取缓存失败: {e}")
 
         # 2. 缓存不存在或读取失败，调用API
         if use_api:
-            followings = self._fetch_followings(user_name)
+            followings = self._fetch_followings(user_name, max_followings=max_followings, kol_following_count=kol_following_count)
 
             # 3. API调用成功，保存到缓存
             if followings:
@@ -419,49 +473,122 @@ class KOLFollowingsFetcher:
         except Exception as e:
             self.logger.error(f"查看缓存状态失败: {e}")
 
-    def _fetch_followings(self, user_name: str, page_size: int = 200) -> List[Dict[str, Any]]:
+    def _get_max_followings_limit(self, kol_following_count: int) -> int:
         """
-        调用第三方API获取关注列表
+        根据KOL的关注人数设置分层爬取限制（新策略）
+
+        Args:
+            kol_following_count: KOL关注的用户总数
+
+        Returns:
+            最大爬取数量
+        """
+        if kol_following_count < 1000:
+            return 200  # 关注数小于1000，获取200条（1页）
+        elif kol_following_count <= 2000:
+            return 300  # 关注数在1000-2000之间，获取300条（2页）
+        else:
+            return 0  # 关注数大于2000，跳过（应该在调用前已被过滤）
+
+    def _fetch_followings(self, user_name: str, page_size: int = 200, max_followings: int = None, kol_following_count: int = 0) -> List[Dict[str, Any]]:
+        """
+        调用第三方API获取关注列表（支持分页获取所有数据）
 
         Args:
             user_name: 用户名
-            page_size: 每页数量
+            page_size: 每页数量（最大200）
+            max_followings: 最大获取数量限制（会自动截断超出部分）
+            kol_following_count: KOL关注的用户总数（用于分层爬取）
 
         Returns:
-            关注用户列表
+            关注用户列表（根据分层策略获取的数据，如超过限制会截断）
         """
+        all_followings = []
+        cursor = ""
+        page_num = 1
+
+        # 根据KOL的关注人数设置最大爬取数量
+        calculated_max = self._get_max_followings_limit(kol_following_count)
+        
+        # 如果外部指定了max_followings，取最小值
+        if max_followings:
+            final_max = min(max_followings, calculated_max)
+        else:
+            final_max = calculated_max
+            
+        self.logger.info(f"  分层爬取策略: KOL关注总数={kol_following_count}, 计算上限={calculated_max}, 最终上限={final_max}")
+
         try:
-            url = self.api_base_url
-            params = {
-                'pageSize': page_size,
-                'userName': user_name
-            }
-            headers = {
-                'X-API-Key': self.api_key
-            }
+            while True:
+                url = self.api_base_url
+                params = {
+                    'pageSize': page_size,
+                    'userName': user_name,
+                    'cursor': cursor
+                }
+                # 新接口只使用 aisa-payment-token header
+                headers = {
+                    'aisa-payment-token': self.api_key
+                }
 
-            self.logger.debug(f"  API请求: {url}?userName={user_name}&pageSize={page_size}")
+                self.logger.debug(f"  API请求(第{page_num}页): {url}?userName={user_name}&pageSize={page_size}&cursor={cursor[:20]}...")
 
-            response = requests.get(url, params=params, headers=headers, timeout=30)
+                response = requests.get(url, params=params, headers=headers, timeout=30)
 
-            if response.status_code == 200:
-                data = response.json()
-                followings = data.get('followings', [])
-                return followings
-            else:
-                self.logger.error(f"  API请求失败: HTTP {response.status_code}")
-                self.logger.error(f"  响应内容: {response.text[:200]}")
-                return []
+                if response.status_code == 200:
+                    data = response.json()
+                    followings = data.get('followings', [])
+                    has_next_page = data.get('has_next_page', False)
+                    next_cursor = data.get('next_cursor', '')
+
+                    all_followings.extend(followings)
+                    self.logger.debug(f"  第{page_num}页获取到 {len(followings)} 条数据, 累计: {len(all_followings)} 条")
+
+                    # 检查是否达到最大获取数量限制
+                    if max_followings and len(all_followings) >= max_followings:
+                        self.logger.debug(f"  已达到获取上限 {max_followings} 条，停止获取")
+                        break
+
+                    # 如果没有下一页,结束循环
+                    if not has_next_page or not next_cursor:
+                        break
+
+                    # 准备获取下一页
+                    cursor = next_cursor
+                    page_num += 1
+
+                    # 分页间隔,避免请求过快
+                    time.sleep(0.5)
+                else:
+                    self.logger.error(f"  API请求失败: HTTP {response.status_code}")
+                    self.logger.error(f"  响应内容: {response.text[:200]}")
+                    break
+
+            # 如果超过限制，截断到最大数量
+            if max_followings and len(all_followings) > max_followings:
+                self.logger.debug(f"  截断数据: {len(all_followings)} -> {max_followings}")
+                return all_followings[:max_followings]
+
+            return all_followings
 
         except requests.RequestException as e:
             self.logger.error(f"  API请求异常: {e}")
-            return []
+            # 返回已获取的数据（截断到限制）
+            if max_followings and len(all_followings) > max_followings:
+                return all_followings[:max_followings]
+            return all_followings
         except json.JSONDecodeError as e:
             self.logger.error(f"  JSON解析失败: {e}")
-            return []
+            # 返回已获取的数据（截断到限制）
+            if max_followings and len(all_followings) > max_followings:
+                return all_followings[:max_followings]
+            return all_followings
         except Exception as e:
             self.logger.error(f"  获取关注列表失败: {e}")
-            return []
+            # 返回已获取的数据（截断到限制）
+            if max_followings and len(all_followings) > max_followings:
+                return all_followings[:max_followings]
+            return all_followings
 
     def _save_followings(self, followings: List[Dict[str, Any]], follower_id: str = None) -> int:
         """
@@ -710,25 +837,17 @@ class KOLFollowingsFetcher:
 
     def _show_statistics(self, test_mode: bool = False, dry_run: bool = False, resume_mode: bool = False):
         """显示统计信息"""
-        self.logger.info("\n" + "=" * 60)
-        self.logger.info("处理完成！")
-        self.logger.info(f"总KOL数: {self.total_kols}")
-        self.logger.info(f"已处理: {self.processed_kols}")
-        self.logger.info(f"成功: {self.success_kols}")
-        self.logger.info(f"失败: {self.failed_kols}")
+        self._log("\n" + "=" * 60, force=True)
+        self._log("✅ 处理完成！", force=True)
+        self._log(f"总KOL: {self.total_kols} | 已处理: {self.processed_kols} | 成功: {self.success_kols} | 跳过: {self.skipped_kols} (>2000) | 失败: {self.failed_kols}", force=True)
 
         if not test_mode:
-            self.logger.info(f"\nAPI调用统计:")
-            self.logger.info(f"  API调用次数: {self.api_calls}")
-            self.logger.info(f"  缓存命中次数: {self.cache_hits}")
-            self.logger.info(f"  总关注用户数: {self.total_followings}")
+            self._log(f"API调用: {self.api_calls}次 | 缓存命中: {self.cache_hits}次 | 总关注数: {self.total_followings}", force=True)
 
             if not dry_run:
-                self.logger.info(f"\n入库统计:")
-                self.logger.info(f"  新增入库: {self.inserted_followings}")
-                self.logger.info(f"  已存在跳过: {self.skipped_followings}")
+                self._log(f"入库: 新增{self.inserted_followings}条 | 已存在{self.skipped_followings}条", force=True)
 
-        self.logger.info("=" * 60)
+        self._log("=" * 60, force=True)
 
 
 def main():
@@ -736,7 +855,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='获取KOL关注列表并入库（带缓存和断点续传）',
+        description='获取List Members关注列表并入库（带缓存和断点续传）',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
@@ -746,8 +865,11 @@ def main():
   # 模拟运行
   python %(prog)s --dry-run --limit 1
 
-  # 正式运行
+  # 正式运行（默认List）
   python %(prog)s --limit 10
+
+  # 指定List ID
+  python %(prog)s --list-id "1996467877948600431" --limit 20
 
   # 从缓存恢复
   python %(prog)s --resume
@@ -760,10 +882,13 @@ def main():
         """
     )
 
+    parser.add_argument('--list-id', type=str,
+                        default='1996467877948600431',
+                        help='Twitter List ID (默认: 1996467877948600431)')
     parser.add_argument('--limit', type=int, default=None,
-                        help='限制处理的KOL数量')
+                        help='限制处理的Member数量')
     parser.add_argument('--skip', type=int, default=0,
-                        help='跳过前N个KOL（已废弃，使用进度自动跳过）')
+                        help='跳过前N个Member（已废弃，使用进度自动跳过）')
     parser.add_argument('--test', action='store_true',
                         help='测试模式（不调用API，不入库）')
     parser.add_argument('--dry-run', action='store_true',
@@ -779,13 +904,20 @@ def main():
     parser.add_argument('--sleep', type=float, default=0.5,
                         help='API调用间隔秒数（默认: 0.5秒，设为0表示无间隔）')
     parser.add_argument('--api-key', type=str,
-                        default='YOUR_TWITTERAPI_IO_KEY',
-                        help='Twitter API密钥')
+                        default='aisa_79b13d0fb25016be8fd3553b5b8055ac',
+                        help='AISA Payment Token')
+    parser.add_argument('--quiet', '-q', action='store_true',
+                        help='静默模式（只显示关键进度信息）')
 
     args = parser.parse_args()
 
     # 创建获取器
-    fetcher = KOLFollowingsFetcher(api_key=args.api_key, cache_dir=args.cache_dir)
+    fetcher = ListMembersFollowingsFetcher(
+        api_key=args.api_key,
+        list_id=args.list_id,
+        cache_dir=args.cache_dir,
+        quiet=args.quiet
+    )
     logger = get_logger(__name__)
 
     # 处理特殊命令
