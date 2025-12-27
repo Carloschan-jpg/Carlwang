@@ -1970,7 +1970,12 @@ Now generate the summary:
             )
 
             if response:
-                summary = response.strip()
+                # 清理Qwen3可能返回的<think>标签
+                import re
+                cleaned_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+                cleaned_response = re.sub(r'</?think>', '', cleaned_response)  # 移除未闭合的标签
+
+                summary = cleaned_response.strip()
 
                 # Validate length (rough check)
                 if len(summary) > 0:
@@ -2189,9 +2194,14 @@ Now generate the summary:
             if response:
                 # Parse JSON response
                 import json
+                import re
                 try:
+                    # 清理Qwen3可能返回的<think>标签
+                    cleaned_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
+                    cleaned_response = re.sub(r'</?think>', '', cleaned_response)  # 移除未闭合的标签
+
                     # Clean response (remove markdown code blocks if present)
-                    cleaned_response = response.strip()
+                    cleaned_response = cleaned_response.strip()
                     if cleaned_response.startswith('```'):
                         # Remove markdown code blocks
                         lines = cleaned_response.split('\n')
