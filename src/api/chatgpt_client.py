@@ -6,6 +6,7 @@ AI API 客户端
 import json
 import logging
 from typing import Dict, Any, List, Optional, Tuple
+import re
 import time
 
 # 尝试导入 Gemini
@@ -30,6 +31,91 @@ from ..utils.config_manager import config
 
 class ChatGPTClient:
     """AI API客户端，支持Gemini和OpenAI兼容API"""
+
+    @staticmethod
+    def _strip_think_tags(text: Optional[str]) -> Optional[str]:
+        """移除 Qwen 等模型可能返回的 <think> 思考过程，避免被入库/日志记录。"""
+        if not text:
+            return text
+        cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        cleaned = re.sub(r'</?think>', '', cleaned)
+        return cleaned
+
+    @staticmethod
+    def _strip_code_fences(text: Optional[str]) -> Optional[str]:
+        if not text:
+            return text
+        t = text.strip()
+        if t.startswith('```'):
+            # 兼容 ```json / ```
+            t = re.sub(r'^```\w*\s*', '', t)
+        if t.endswith('```'):
+            t = t[:-3]
+        return t.strip()
+
+    @staticmethod
+    def _extract_json_object(text: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not text:
+            return None
+        t = ChatGPTClient._strip_code_fences(text)
+        try:
+            obj = json.loads(t)
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+
+        # 尝试从杂文本中提取第一个 {...} 片段
+        m = re.search(r'\{[\s\S]*\}', t)
+        if not m:
+            return None
+        try:
+            obj = json.loads(m.group(0))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _looks_like_reasoning(text: Optional[str]) -> bool:
+        if not text:
+            return False
+        t = text.strip().lower()
+        # 典型“思考/过程化”措辞（不依赖 <think> 标签）
+        suspicious = [
+            "okay, let's",
+            "let's tackle",
+            "the user wants",
+            "first, i need",
+            "i need to",
+            "i should",
+            "requirements are",
+            "the requirements",
+            "my task is",
+            "i will",
+            "step by step",
+        ]
+        if any(p in t for p in suspicious):
+            return True
+        # 多段落、带明显自述过程，也高度可疑
+        if t.count('\n\n') >= 2 and ("i " in t or "let's" in t):
+            return True
+        return False
+
+    @staticmethod
+    def _sanitize_summary_text(text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        t = ChatGPTClient._strip_code_fences(text)
+        if not t:
+            return None
+        # 去掉常见前缀
+        t = re.sub(r'^(summary\s*:|final\s*:|output\s*:|结果\s*:|摘要\s*:)', '', t.strip(), flags=re.IGNORECASE).strip()
+        # 去掉包裹引号
+        if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+            t = t[1:-1].strip()
+        # 太长基本不可能是“公告摘要”
+        if len(t) > 500:
+            return None
+        return t or None
 
     def __init__(self):
         """初始化AI客户端"""
@@ -173,6 +259,9 @@ class ChatGPTClient:
 
                     response = chat.send_message(prompt)
                     content = response.text
+
+                # 统一清理Qwen等模型可能返回的<think>标签（放在底层，避免上层遗漏/被错误日志记录）
+                content = self._strip_think_tags(content)
 
                 self.request_count += 1
                 self.success_count += 1
@@ -1937,25 +2026,22 @@ If the tweet does NOT match any category, return:
         """
         try:
             prompt = f"""
-You are a professional crypto project announcement editor. Your task is to transform the following tweet into a concise, professional announcement summary.
+/no_think
 
-Original tweet: {tweet_content}
+You are a professional crypto project announcement editor.
 
-Requirements:
-1. Rewrite the tweet to sound like an official announcement rather than a casual social media post
-2. Keep it concise: maximum 50 characters in Chinese OR 50 words in English
-3. Focus on the key announcement content (what is happening, when, who is involved)
-4. Use professional and formal tone
-5. Remove casual language, emojis, and unnecessary details
-6. Preserve important information like dates, partner names, event names, or technical updates
+Transform the following tweet into a concise, professional announcement summary.
 
-Return ONLY the summary text without any additional explanation or formatting.
+Tweet: {tweet_content}
 
-Example:
-Input: "🎉 Excited to announce our partnership with @ABC! This is huge for our ecosystem! Stay tuned for more details 🚀"
-Output: "Partnership announced with ABC to expand ecosystem capabilities"
+Constraints:
+- Output MUST be valid JSON only.
+- JSON schema: {{"summary": "..."}}.
+- "summary" must be a single concise sentence/line.
+- Max length: 50 Chinese characters OR 50 English words.
+- No analysis, no explanation, no meta text.
 
-Now generate the summary:
+Return ONLY the JSON.
 """
 
             messages = [
@@ -1965,26 +2051,51 @@ Now generate the summary:
 
             response = self._make_request(
                 messages=messages,
-                temperature=0.3,  # Moderate temperature for professional yet concise output
-                max_tokens=100    # Limit tokens to ensure conciseness
+                temperature=0.0,
+                max_tokens=120
             )
 
-            if response:
-                # 清理Qwen3可能返回的<think>标签
-                import re
-                cleaned_response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL)
-                cleaned_response = re.sub(r'</?think>', '', cleaned_response)  # 移除未闭合的标签
-
-                summary = cleaned_response.strip()
-
-                # Validate length (rough check)
-                if len(summary) > 0:
-                    self.logger.info(f"Generated announcement summary: {summary[:100]}...")
-                    return summary
-                else:
-                    self.logger.warning("Generated summary is empty")
+            def _parse_response_to_summary(resp: Optional[str]) -> Optional[str]:
+                if not resp:
                     return None
+                obj = self._extract_json_object(resp)
+                if obj and isinstance(obj.get('summary'), str):
+                    candidate = self._sanitize_summary_text(obj.get('summary'))
+                else:
+                    candidate = self._sanitize_summary_text(resp)
+                if not candidate:
+                    return None
+                if self._looks_like_reasoning(candidate):
+                    return None
+                return candidate
 
+            summary = _parse_response_to_summary(response)
+
+            # 如果模型没有按要求返回（或返回了“思考体”文本），再用更强约束重试一次
+            if not summary:
+                retry_prompt = f"""
+/no_think
+
+Return ONLY valid JSON: {{"summary": "..."}}.
+
+Rules:
+- Do NOT include any analysis, reasoning, planning, or meta commentary.
+- If you cannot comply, return: {{"summary": ""}}.
+
+Tweet: {tweet_content}
+"""
+                retry_messages = [
+                    {"role": "system", "content": "Return JSON only. No analysis."},
+                    {"role": "user", "content": retry_prompt},
+                ]
+                retry_response = self._make_request(messages=retry_messages, temperature=0.0, max_tokens=120)
+                summary = _parse_response_to_summary(retry_response)
+
+            if summary:
+                self.logger.info(f"Generated announcement summary: {summary[:120]}...")
+                return summary
+
+            self.logger.warning("Generated announcement summary is invalid (reasoning/empty/non-json); returning None")
             return None
 
         except Exception as e:

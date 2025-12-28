@@ -66,5 +66,8 @@ kol_fetch.pid
 *.temp
 .cache/
 
+# Local backfill scratch
+1228back/
+
 # KOL Following Fetcher cache
 .kol_cache/
