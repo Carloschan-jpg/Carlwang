@@ -31,12 +31,19 @@ venv.bak/
 
 # Configuration files with sensitive data
 config/config.json
+config/config.json.*
+config/*.backup*
+config/*backup*
+config/*secret*
 .env
 .env.local
 .env.production
 
 # Logs
 *.log
+*.log.*
+logs/
+nohup.out
 service.log
 monitor.log
 kol_fetch.log
@@ -45,6 +52,9 @@ kol_fetch.log
 *.pid
 twitter-crawler.pid
 kol_fetch.pid
+
+# Output folders
+reports/
 
 # IDE
 .vscode/
@@ -65,6 +75,10 @@ kol_fetch.pid
 *.tmp
 *.temp
 .cache/
+
+# Backups
+backup_*/
+*.backup
 
 # Local backfill scratch
 1228back/

@@ -19,11 +19,16 @@ echo -e "${CYAN}📊 Twitter项目推文爬取服务 - 运行状态${NC}"
 echo "=================================================="
 echo ""
 
+# 统一口径：服务由 ../service_scripts 目录的脚本启动/维护，PID/日志也在该目录
+SERVICE_SCRIPTS_DIR="$(cd "$SCRIPT_DIR/../service_scripts" && pwd)"
+PID_FILE="$SERVICE_SCRIPTS_DIR/twitter-crawler-project-twitterapi.pid"
+LOG_FILE="$SCRIPT_DIR/service_project_twitterapi.log"
+MONITOR_SCRIPT="$SERVICE_SCRIPTS_DIR/service_project_monitor.sh"
+
 # 1. 检查 PID 文件中的服务
 echo -e "${BLUE}【1】PID 文件记录的服务：${NC}"
 echo "--------------------------------------------------"
 
-PID_FILE="../service_scripts/twitter-crawler-project-twitterapi.pid"
 if [ -f "$PID_FILE" ]; then
     PID=$(cat "$PID_FILE")
     if ps -p $PID > /dev/null 2>&1; then
@@ -49,7 +54,7 @@ fi
 echo -e "${BLUE}【2】所有相关的 Python 进程：${NC}"
 echo "--------------------------------------------------"
 
-PYTHON_PROCESSES=$(ps aux | grep -E "python.*main.py.*project" | grep -v grep)
+PYTHON_PROCESSES=$(ps aux | grep -E "[Pp]ython.*main.py.*project-schedule" | grep -v grep)
 if [ -n "$PYTHON_PROCESSES" ]; then
     echo "$PYTHON_PROCESSES" | while read line; do
         PID=$(echo $line | awk '{print $2}')
@@ -86,8 +91,6 @@ fi
 # 4. Cron 监控任务
 echo -e "${BLUE}【4】Cron 自动监控任务：${NC}"
 echo "--------------------------------------------------"
-
-MONITOR_SCRIPT="../service_scripts/service_project_monitor.sh"
 EXISTING_CRON=$(crontab -l 2>/dev/null | grep -F "$MONITOR_SCRIPT")
 if [ -n "$EXISTING_CRON" ]; then
     echo -e "${GREEN}✅ 监控定时任务已启用${NC}"
@@ -101,8 +104,6 @@ fi
 # 5. 最近运行日志
 echo -e "${BLUE}【5】最近运行日志（最新5条）：${NC}"
 echo "--------------------------------------------------"
-
-LOG_FILE="../service_scripts/service_project_twitterapi.log"
 if [ -f "$LOG_FILE" ]; then
     tail -n 5 "$LOG_FILE" | sed 's/^/   /'
     echo ""

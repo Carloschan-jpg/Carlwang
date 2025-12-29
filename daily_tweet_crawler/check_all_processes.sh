@@ -12,7 +12,10 @@ NC='\033[0m' # No Color
 
 # 动态检测当前脚本所在目录
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_FILE="$SCRIPT_DIR/twitter-crawler-project-twitterapi.pid"
+
+# 统一使用 service_scripts 目录的 PID 文件，避免 daily_tweet_crawler/service_scripts 两套脚本互相“看不见”
+SERVICE_SCRIPTS_DIR="$(cd "$SCRIPT_DIR/../service_scripts" && pwd)"
+PID_FILE="$SERVICE_SCRIPTS_DIR/twitter-crawler-project-twitterapi.pid"
 
 echo "========================================================"
 echo -e "${BLUE}🔍 Twitter爬虫进程监控${NC}"
@@ -63,6 +66,7 @@ echo -e "${YELLOW}【2】PID文件记录的官方服务:${NC}"
 echo "--------------------------------------------------------"
 
 echo "当前目录: $SCRIPT_DIR"
+echo "服务脚本目录: $SERVICE_SCRIPTS_DIR"
 echo "PID文件: $PID_FILE"
 echo ""
 

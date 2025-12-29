@@ -4,7 +4,7 @@
 # 统计 service_project_twitterapi.log 中的成本数据
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_FILE="$SCRIPT_DIR/service_scripts/service_project_twitterapi.log"
+LOG_FILE="$SCRIPT_DIR/daily_tweet_crawler/service_project_twitterapi.log"
 
 # 颜色定义
 GREEN='\033[0;32m'
@@ -93,7 +93,7 @@ echo ""
 echo "=================================================="
 echo -e "${BLUE}🔍 实时监控命令${NC}"
 echo "=================================================="
-echo "  实时日志: tail -f service_scripts/service_project_twitterapi.log"
-echo "  查看状态: ./service_scripts/start_service_project_twitterapi.sh status"
-echo "  查看日志: ./service_scripts/start_service_project_twitterapi.sh logs 100"
+echo "  实时日志: tail -f daily_tweet_crawler/service_project_twitterapi.log"
+echo "  查看状态: ./daily_tweet_crawler/start_service_project_twitterapi.sh status"
+echo "  查看日志: ./daily_tweet_crawler/start_service_project_twitterapi.sh logs 100"
 echo "=================================================="

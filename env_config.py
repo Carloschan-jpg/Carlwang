@@ -18,15 +18,19 @@ def load_config_with_env():
         with open(config_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
     else:
-        # 如果没有config.json，使用模板
-        template_file = Path("config/config.json.template")
-        with open(template_file, 'r', encoding='utf-8') as f:
+        # 如果没有config.json，使用示例配置
+        example_file = Path("config/config.example.json")
+        with open(example_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
     
     # 从环境变量覆盖敏感配置
     # TweetScout API
     if os.getenv('TWEETSCOUT_API_KEY'):
         config['api']['headers']['ApiKey'] = os.getenv('TWEETSCOUT_API_KEY')
+
+    # twitterapi.io API
+    if os.getenv('TWITTERAPI_IO_KEY'):
+        config.setdefault('api_twitterapi', {}).setdefault('headers', {})['X-API-Key'] = os.getenv('TWITTERAPI_IO_KEY')
     
     # Gemini/OpenAI API (支持环境变量覆盖)
     # 优先使用 GEMINI_API_KEY，如果没有则使用 OPENAI_API_KEY（向后兼容）
@@ -56,6 +60,7 @@ def load_config_with_env():
     # 验证必要的配置
     required_configs = [
         ('TweetScout API Key', config['api']['headers'].get('ApiKey')),
+        ('twitterapi.io API Key', config.get('api_twitterapi', {}).get('headers', {}).get('X-API-Key')),
         ('Gemini/OpenAI API Key', config['chatgpt'].get('api_key')),
         ('Database Host', config['database'].get('host')),
         ('Database Password', config['database'].get('password'))
@@ -79,6 +84,9 @@ def create_env_file():
 
 # TweetScout API配置
 TWEETSCOUT_API_KEY=your-tweetscout-api-key
+
+# twitterapi.io 配置
+TWITTERAPI_IO_KEY=your-twitterapi-io-key
 
 # Gemini API配置（优先）
 GEMINI_API_KEY=your-gemini-api-key

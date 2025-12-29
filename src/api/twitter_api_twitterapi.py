@@ -281,13 +281,14 @@ class TwitterAPITwitterAPIClient:
             # 新格式：/twitter/list/tweets - list_id 作为查询参数
             url = self._build_url()
 
-        pagination_token = kwargs.pop('pagination_token', None)
-        # 兼容旧的 cursor 参数
-        pagination_token = kwargs.pop('cursor', pagination_token)
+        # twitterapi.io 的分页参数为 cursor（每页固定 20 条）
+        cursor = kwargs.pop('cursor', None)
+        # 兼容旧代码传入的 pagination_token
+        cursor = kwargs.pop('pagination_token', cursor)
 
-        max_results = kwargs.pop('max_results', None)
-        if max_results is None:
-            max_results = kwargs.pop('count', None)
+        # 兼容旧参数（twitterapi.io 会忽略 max_results/count，这里仅消费掉避免透传干扰）
+        _ = kwargs.pop('max_results', None)
+        _ = kwargs.pop('count', None)
 
         params: Dict[str, Any] = {}
 
@@ -295,10 +296,8 @@ class TwitterAPITwitterAPIClient:
         if '{list_id}' not in endpoint_tpl:
             params['listId'] = target_list_id  # 使用驼峰命名 listId
 
-        if max_results:
-            params['max_results'] = max_results
-        if pagination_token:
-            params['pagination_token'] = pagination_token
+        if cursor:
+            params['cursor'] = cursor
 
         params.update(kwargs)
 
@@ -326,9 +325,14 @@ class TwitterAPITwitterAPIClient:
                 tweets = converted_tweets
                 self.logger.debug(f"已转换 {len(tweets)} 条推文格式")
 
-            # 获取分页信息
+            # 获取分页信息（twitterapi.io 返回 next_cursor/has_next_page）
             meta = data.get('meta', {}) if isinstance(data.get('meta'), dict) else {}
-            next_token = meta.get('next_token') or data.get('next_cursor')  # 适配两种格式
+            has_next_page = data.get('has_next_page')
+            next_cursor = data.get('next_cursor')
+            next_token = meta.get('next_token') or next_cursor or data.get('next_cursor')
+
+            if has_next_page is False:
+                next_token = None
 
             # 计算并记录成本
             request_cost = self._calculate_request_cost(len(tweets))

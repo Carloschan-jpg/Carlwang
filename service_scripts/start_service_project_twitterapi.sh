@@ -9,7 +9,10 @@ cd "$SCRIPT_DIR"
 
 SERVICE_NAME="twitter-crawler-project-twitterapi"
 PID_FILE="$SCRIPT_DIR/${SERVICE_NAME}.pid"
-LOG_FILE="$SCRIPT_DIR/service_project_twitterapi.log"
+
+# 日志统一放到 daily_tweet_crawler 目录（用户主入口目录）
+DAILY_DIR="$PROJECT_ROOT/daily_tweet_crawler"
+LOG_FILE="$DAILY_DIR/service_project_twitterapi.log"
 
 # 默认配置
 DEFAULT_INTERVAL=15        # 15分钟跑一次
@@ -41,37 +44,55 @@ print_error() {
 }
 
 check_status() {
-    if [ -f "$PID_FILE" ]; then
-        PID=$(cat "$PID_FILE")
-        if ps -p $PID > /dev/null 2>&1; then
-            print_info "项目推文服务 (TwitterAPI) 正在运行 (PID: $PID)"
-            return 0
-        else
-            print_warning "PID文件存在但进程不存在，清理PID文件"
-            rm -f "$PID_FILE"
-            return 1
-        fi
-    else
+    if [ ! -f "$PID_FILE" ]; then
         print_info "项目推文服务 (TwitterAPI) 未运行"
         return 1
     fi
+
+    PID=$(cat "$PID_FILE")
+    if ! ps -p "$PID" > /dev/null 2>&1; then
+        print_warning "PID文件存在但进程不存在，清理PID文件"
+        rm -f "$PID_FILE"
+        return 1
+    fi
+
+    # 进一步校验：PID 必须是项目爬虫 python 进程，避免误把 caffeinate/nohup 当成服务本体
+    local cmdline
+    cmdline=$(ps -p "$PID" -o command= 2>/dev/null)
+    if [[ "$cmdline" != *"main.py"* ]] || [[ "$cmdline" != *"project-schedule"* ]]; then
+        print_warning "PID文件指向的进程不是预期项目爬虫，清理PID文件"
+        print_warning "当前进程命令: $cmdline"
+        rm -f "$PID_FILE"
+        return 1
+    fi
+
+    print_info "项目推文服务 (TwitterAPI) 正在运行 (PID: $PID)"
+    return 0
 }
 
 stop_service() {
     print_info "正在停止项目推文数据爬取服务 (TwitterAPI)..."
-    pkill -f "python.*main.py.*project-schedule" 2>/dev/null
+
+    # 1) 优先按 PID 文件停止（PID 文件记录的是 Python 主进程 PID）
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
-        if ps -p $PID > /dev/null 2>&1; then
-            kill $PID
+        if ps -p "$PID" > /dev/null 2>&1; then
+            kill "$PID" 2>/dev/null || true
             sleep 3
-            if ps -p $PID > /dev/null 2>&1; then
-                print_warning "进程未响应，强制终止"
-                kill -9 $PID
+            if ps -p "$PID" > /dev/null 2>&1; then
+                print_warning "进程未响应，强制终止 (PID: $PID)"
+                kill -9 "$PID" 2>/dev/null || true
             fi
         fi
         rm -f "$PID_FILE"
     fi
+
+    # 2) 兜底：清理可能残留的 python 进程（限制在本项目目录，避免误杀其它 python）
+    pkill -f "$PROJECT_ROOT/.*main.py.*project-schedule" 2>/dev/null || true
+
+    # 3) 兜底：清理可能残留的 caffeinate 等待进程（以项目命令行特征匹配）
+    pkill -f "caffeinate.*main.py.*project-schedule" 2>/dev/null || true
+
     remove_monitoring
     print_success "项目推文服务 (TwitterAPI) 已停止"
 }
@@ -96,25 +117,31 @@ start_service() {
 
     mkdir -p "$(dirname "$LOG_FILE")"
 
+    # 关键点：PID 文件必须记录“Python 主进程 PID”，否则 stop/status 容易误判（例如记录到 caffeinate/nohup 的 PID）
     if [[ "$OSTYPE" == "darwin"* ]]; then
         print_info "检测到macOS，使用防休眠启动..."
-        TWITTER_API_BACKEND=twitterapi caffeinate -i nohup bash -c "cd '$PROJECT_ROOT' && '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode project-schedule \
+        # 启动 Python（nohup + bash -c + exec 确保 PID 对应到 python 进程）
+        TWITTER_API_BACKEND=twitterapi nohup bash -c "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode project-schedule \
             --interval $interval \
             --max-pages $max_pages \
             --page-size $page_size \
             --hours-limit $hours_limit" > "$LOG_FILE" 2>&1 &
+        local pid=$!
+        echo "$pid" > "$PID_FILE"
+        # 让系统在服务运行期间保持唤醒：caffeinate 只负责等待 python PID
+        caffeinate -i -w "$pid" >/dev/null 2>&1 &
     else
-        TWITTER_API_BACKEND=twitterapi nohup nice -n -5 bash -c "cd '$PROJECT_ROOT' && '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode project-schedule \
+        TWITTER_API_BACKEND=twitterapi nohup nice -n -5 bash -c "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode project-schedule \
             --interval $interval \
             --max-pages $max_pages \
             --page-size $page_size \
             --hours-limit $hours_limit" > "$LOG_FILE" 2>&1 &
+        local pid=$!
+        echo "$pid" > "$PID_FILE"
     fi
 
-    local pid=$!
-    echo $pid > "$PID_FILE"
     sleep 3
-    if ps -p $pid > /dev/null 2>&1; then
+    if ps -p "$pid" > /dev/null 2>&1; then
         print_success "项目推文服务 (TwitterAPI) 启动成功 (PID: $pid)"
         print_info "日志文件: $LOG_FILE"
         print_info "PID文件: $PID_FILE"
@@ -146,7 +173,7 @@ setup_monitoring() {
     if crontab "$temp_cron" 2>/dev/null; then
         print_success "项目推文监控定时任务设置成功"
         print_info "监控频率: 每5分钟检查一次服务状态"
-        print_info "监控日志: $SCRIPT_DIR/monitor_project.log"
+        print_info "监控日志: $DAILY_DIR/monitor_project.log"
     else
         print_error "设置项目推文监控定时任务失败"
         print_info "请手动添加以下cron任务:"

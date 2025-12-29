@@ -12,7 +12,7 @@ from pathlib import Path
 def setup_config():
     """设置配置文件"""
     config_dir = Path("config")
-    template_file = config_dir / "config.json.template"
+    template_file = config_dir / "config.example.json"
     config_file = config_dir / "config.json"
     
     print("🚀 Twitter数据爬虫配置设置")
@@ -20,7 +20,7 @@ def setup_config():
     
     # 检查模板文件是否存在
     if not template_file.exists():
-        print("❌ 模板文件不存在：config/config.json.template")
+        print("❌ 模板文件不存在：config/config.example.json")
         return False
     
     # 如果配置文件已存在，询问是否覆盖
@@ -86,7 +86,7 @@ def setup_config():
 def reset_config():
     """重置配置文件到模板状态"""
     config_dir = Path("config")
-    template_file = config_dir / "config.json.template"
+    template_file = config_dir / "config.example.json"
     config_file = config_dir / "config.json"
     
     if not template_file.exists():

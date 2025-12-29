@@ -14,7 +14,8 @@ def test_gemini_api(api_key: str, model: str = "gemini-2.5-flash-lite"):
         model: 模型名称
     """
     try:
-        print(f"🔑 测试 API Key: {api_key[:10]}...{api_key[-4:] if len(api_key) > 14 else '*' * 4}")
+        # 不要在输出中展示任何真实密钥内容（即使截断也属于敏感信息）
+        print("🔑 测试 API Key: [REDACTED]")
         print(f"📋 使用模型: {model}")
         print("-" * 50)
         
@@ -62,16 +63,28 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         api_key = sys.argv[1]
     else:
-        # 从配置文件读取
+        # 从环境变量或配置文件读取（优先环境变量）
         import json
+        import os
         from pathlib import Path
+
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        model = os.getenv("GEMINI_MODEL", "")
         
         config_file = Path("config/config.json")
         if config_file.exists():
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            api_key = config.get('chatgpt', {}).get('api_key', '')
-            model = config.get('chatgpt', {}).get('model', 'gemini-2.5-flash-lite')
+            # 优先 Gemini 备份配置，其次才读取当前 chatgpt 配置
+            if not api_key:
+                api_key = config.get('chatgpt_backup_gemini', {}).get('api_key', '')
+            if not api_key:
+                api_key = config.get('chatgpt', {}).get('api_key', '')
+
+            if not model:
+                model = config.get('chatgpt_backup_gemini', {}).get('model', '')
+            if not model:
+                model = config.get('chatgpt', {}).get('model', 'gemini-2.5-flash-lite')
         else:
             print("❌ 未找到配置文件 config/config.json")
             print("💡 使用方法: python test_gemini_api.py <API_KEY>")

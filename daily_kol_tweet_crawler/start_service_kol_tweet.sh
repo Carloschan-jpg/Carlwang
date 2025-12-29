@@ -11,6 +11,9 @@ SERVICE_NAME="twitter-crawler-kol-tweet"
 PID_FILE="$SCRIPT_DIR/${SERVICE_NAME}.pid"
 LOG_FILE="$SCRIPT_DIR/service_kol_tweet.log"
 
+# 仅匹配“本项目目录 + KOL 定时模式”进程，避免把 project-schedule / 其他 schedule 服务误判为 KOL
+EXPECTED_MODE="--mode schedule"
+
 # 默认配置
 DEFAULT_INTERVAL=60
 DEFAULT_MAX_PAGES=50
@@ -44,9 +47,16 @@ check_status() {
     # 1. 首先检查 PID 文件记录的进程
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
-        if ps -p $PID > /dev/null 2>&1; then
-            print_info "KOL推文爬取服务正在运行 (PID: $PID)"
-            return 0
+        if ps -p "$PID" > /dev/null 2>&1; then
+            # 进一步校验：PID 必须是本项目的 KOL schedule 进程
+            CMDLINE=$(ps -p "$PID" -o command= 2>/dev/null)
+            if [[ "$CMDLINE" == *"$PROJECT_ROOT/main.py"* ]] && [[ "$CMDLINE" == *"$EXPECTED_MODE"* ]]; then
+                print_info "KOL推文爬取服务正在运行 (PID: $PID)"
+                return 0
+            fi
+            print_warning "PID文件指向的进程不是预期KOL爬虫，清理PID文件"
+            print_warning "当前进程命令: $CMDLINE"
+            rm -f "$PID_FILE"
         else
             print_warning "PID文件存在但进程不存在，清理PID文件"
             rm -f "$PID_FILE"
@@ -54,13 +64,13 @@ check_status() {
     fi
 
     # 2. 即使没有 PID 文件，也检查是否有实际运行的进程（防止重复启动）
-    RUNNING_PROCS=$(ps -ef | grep "[P]ython.*main.py.*schedule" | wc -l | tr -d ' ')
-    if [ "$RUNNING_PROCS" -gt 0 ]; then
+    RUNNING_LINES=$(ps -ef | grep -E "[Pp]ython.*$PROJECT_ROOT/.*main.py" | grep -F -- "$EXPECTED_MODE" 2>/dev/null || true)
+    if [ -n "$RUNNING_LINES" ]; then
+        RUNNING_PROCS=$(echo "$RUNNING_LINES" | wc -l | tr -d ' ')
         print_warning "发现 $RUNNING_PROCS 个运行中的KOL推文爬虫进程（无PID文件追踪）"
-        # 显示这些进程
-        ps -ef | grep "[P]ython.*main.py.*schedule" | while read line; do
-            ORPHAN_PID=$(echo $line | awk '{print $2}')
-            START_TIME=$(echo $line | awk '{print $5}')
+        echo "$RUNNING_LINES" | while read -r line; do
+            ORPHAN_PID=$(echo "$line" | awk '{print $2}')
+            START_TIME=$(echo "$line" | awk '{print $5}')
             print_warning "  - PID $ORPHAN_PID (启动时间: $START_TIME)"
         done
         return 0
@@ -74,18 +84,21 @@ stop_service() {
     print_info "正在停止KOL推文爬取服务..."
 
     # 停止现有的所有爬虫进程
-    pkill -f "python.*main.py.*schedule" 2>/dev/null
+    pkill -f "$PROJECT_ROOT/.*main.py.*--mode schedule" 2>/dev/null || true
 
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
-        if ps -p $PID > /dev/null 2>&1; then
-            kill $PID
+        if ps -p "$PID" > /dev/null 2>&1; then
+            kill "$PID" 2>/dev/null || true
             sleep 3
-            if ps -p $PID > /dev/null 2>&1; then
+            if ps -p "$PID" > /dev/null 2>&1; then
                 print_warning "进程未响应，强制终止"
-                kill -9 $PID
+                kill -9 "$PID" 2>/dev/null || true
             fi
         fi
+
+        # macOS 防休眠等待进程（caffeinate -w <PID>）兜底清理
+        pkill -f "caffeinate.*-w[[:space:]]*$PID" 2>/dev/null || true
         rm -f "$PID_FILE"
     fi
 
@@ -129,15 +142,15 @@ start_service() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         # macOS系统
         print_info "检测到macOS，使用防休眠启动..."
-        # 设置环境变量使用 Twitter API (twitterapi)
-        caffeinate -i nohup bash -c "cd '$PROJECT_ROOT' && export TWITTER_API_BACKEND=twitterapi && '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode schedule \
+        # 关键点：PID 文件记录 Python 主进程 PID（避免 stop/status 误判到 caffeinate/nohup）
+        TWITTER_API_BACKEND=twitterapi nohup bash -c "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode schedule \
             --interval $interval \
             --max-pages $max_pages \
             --page-size $page_size \
             --hours-limit $hours_limit" > "$LOG_FILE" 2>&1 &
     else
         # Linux系统
-        nohup nice -n -5 bash -c "cd '$PROJECT_ROOT' && export TWITTER_API_BACKEND=twitterapi && '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode schedule \
+        TWITTER_API_BACKEND=twitterapi nohup nice -n -5 bash -c "cd '$PROJECT_ROOT' && exec '$PROJECT_ROOT/venv/bin/python' '$PROJECT_ROOT/main.py' --mode schedule \
             --interval $interval \
             --max-pages $max_pages \
             --page-size $page_size \
@@ -146,6 +159,11 @@ start_service() {
 
     local pid=$!
     echo $pid > "$PID_FILE"
+
+    # macOS 防休眠：仅等待 python PID
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        caffeinate -i -w "$pid" >/dev/null 2>&1 &
+    fi
 
     # 等待服务启动
     sleep 3

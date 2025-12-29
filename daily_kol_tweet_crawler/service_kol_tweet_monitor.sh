@@ -8,6 +8,9 @@ SERVICE_SCRIPT="$SCRIPT_DIR/start_service_kol_tweet.sh"
 PID_FILE="$SCRIPT_DIR/twitter-crawler-kol-tweet.pid"
 MONITOR_LOG="$SCRIPT_DIR/monitor_kol_tweet.log"
 
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+EXPECTED_MODE="--mode schedule"
+
 # 写入监控日志
 log_monitor() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$MONITOR_LOG"
@@ -23,7 +26,7 @@ check_service() {
     fi
 
     # 检查是否有运行中的进程（即使没有PID文件）
-    RUNNING_PROCS=$(ps -ef | grep "[P]ython.*main.py.*schedule" | wc -l | tr -d ' ')
+    RUNNING_PROCS=$(ps -ef | grep -E "[Pp]ython.*$PROJECT_ROOT/.*main.py" | grep -F -- "$EXPECTED_MODE" | wc -l | tr -d ' ')
     if [ "$RUNNING_PROCS" -gt 0 ]; then
         return 0  # 服务运行中
     fi

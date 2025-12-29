@@ -6,10 +6,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DAILY_DIR="$PROJECT_ROOT/daily_tweet_crawler"
+
 SERVICE_NAME="twitter-crawler-project-twitterapi"
 PID_FILE="$SCRIPT_DIR/${SERVICE_NAME}.pid"
-LOG_FILE="$SCRIPT_DIR/service_project_twitterapi.log"
-MONITOR_LOG="$SCRIPT_DIR/monitor_project.log"
+LOG_FILE="$DAILY_DIR/service_project_twitterapi.log"
+MONITOR_LOG="$DAILY_DIR/monitor_project.log"
 START_CMD="$SCRIPT_DIR/start_service_project_twitterapi.sh start"
 
 log() {
